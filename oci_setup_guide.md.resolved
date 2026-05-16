@@ -1,0 +1,303 @@
+# 🚀 Complete Guide: Running OCI ARM Capacity Script on Your Free Instance
+
+You have a **VM.Standard.E2.1.Micro** (1/8 OCPU, 1 GB RAM) instance and want to run the `oci-arm-host-capacity` PHP script continuously to snag an ARM instance when capacity opens up.
+
+---
+
+## 📋 What You Need (Checklist)
+
+| # | Item | Where to Get It |
+|---|------|-----------------|
+| 1 | **OCI API Key** (private `.pem` file + fingerprint) | OCI Console → Profile → User Settings → API Keys |
+| 2 | **OCI Region** | From your tenancy (e.g. `ap-mumbai-1`, `us-ashburn-1`) |
+| 3 | **User OCID** | OCI Console → Profile → User Settings |
+| 4 | **Tenancy OCID** | OCI Console → Profile → Tenancy |
+| 5 | **Subnet ID** | Captured from browser dev tools (see Step 2 below) |
+| 6 | **Image ID** | Captured from browser dev tools (see Step 2 below) |
+| 7 | **SSH Public Key** | Your `~/.ssh/id_rsa.pub` (or generate one) |
+| 8 | **PHP 7.x or 8.x** | Install on instance |
+| 9 | **Composer** | Install on instance |
+| 10 | **git** | Install on instance |
+
+---
+
+## Step 1: Generate OCI API Key (in OCI Console)
+
+1. Log in to [OCI Console](https://cloud.oracle.com/)
+2. Click your **profile icon** (top-right) → **User Settings**
+3. Go to **Resources** → **API Keys** → **Add API Key**
+4. Select **"Generate API Key Pair"**
+5. Click **"Download Private Key"** → save the `.pem` file (you'll upload this to your instance later)
+6. Click **"Add"**
+7. **Copy the configuration preview** that appears — it contains:
+   ```
+   [DEFAULT]
+   user=ocid1.user.oc1..aaaa...
+   fingerprint=xx:xx:xx:...
+   tenancy=ocid1.tenancy.oc1..aaaa...
+   region=your-region
+   key_file=<path to your private key>
+   ```
+   
+> [!IMPORTANT]
+> Save this information — you'll need the **user OCID**, **tenancy OCID**, **fingerprint**, and **region** for the `.env` file.
+
+---
+
+## Step 2: Get Subnet ID & Image ID (from Browser Dev Tools)
+
+This is the trickiest part. You need to **pretend** to create an ARM instance to capture the API request parameters.
+
+1. In OCI Console → **Menu** → **Compute** → **Instances** → **Create Instance**
+2. Change the **Image**: Pick your desired OS (e.g., Ubuntu 22.04, Oracle Linux 8)
+3. Change the **Shape**: Select **Ampere** → **VM.Standard.A1.Flex** → set 4 OCPUs / 24 GB RAM
+4. In **Networking**: use your existing VCN/Subnet, **uncheck** "Assign a public IPv4 address"
+5. **Before clicking "Create"** → Open browser **DevTools** (F12) → go to the **Network** tab
+6. Click **"Create"** — you'll likely get an "Out of capacity" error
+7. In DevTools Network tab, find the **red** `/instances` API call
+8. **Right-click** → **Copy as cURL**
+9. Paste in a text editor and find:
+   - `"subnetId": "ocid1.subnet.oc1..."` → this is your **`OCI_SUBNET_ID`**
+   - `"imageId": "ocid1.image.oc1..."` → this is your **`OCI_IMAGE_ID`**
+   - Note the `"availabilityDomain"` value too (e.g., `jYtI:AP-MUMBAI-1-AD-1`)
+
+> [!TIP]
+> For ARM instances, you can leave `OCI_AVAILABILITY_DOMAIN` empty — the script will auto-discover all ADs and try each one.
+
+---
+
+## Step 3: Set Up Your Instance (SSH Commands)
+
+You've SSHed into your OCI instance via VS Code. Now run these commands:
+
+### 3a. Update system & install PHP + Composer + git
+
+**For Oracle Linux / CentOS (most likely on OCI):**
+```bash
+# Update packages
+sudo yum update -y
+
+# Enable PHP module (Oracle Linux 8+)
+sudo dnf module enable php:8.0 -y  # or php:8.1
+
+# Install PHP and required extensions
+sudo yum install -y php php-cli php-curl php-json php-mbstring php-xml git unzip
+
+# Verify PHP
+php -v
+
+# Install Composer
+curl -sS https://getcomposer.org/installer | php
+sudo mv composer.phar /usr/local/bin/composer
+
+# Verify Composer
+composer --version
+```
+
+**For Ubuntu (if your instance runs Ubuntu):**
+```bash
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Install PHP and required extensions
+sudo apt install -y php php-cli php-curl php-mbstring php-xml git unzip
+
+# Verify PHP
+php -v
+
+# Install Composer
+curl -sS https://getcomposer.org/installer | php
+sudo mv composer.phar /usr/local/bin/composer
+
+# Verify Composer
+composer --version
+```
+
+### 3b. Clone the repo & install dependencies
+
+```bash
+cd ~
+git clone https://github.com/hitrov/oci-arm-host-capacity.git
+cd oci-arm-host-capacity
+composer install
+```
+
+---
+
+## Step 4: Upload Your Private Key
+
+Upload the `.pem` file you downloaded in Step 1 to your instance. From your **local machine** (PowerShell):
+
+```powershell
+# Replace with your actual values
+scp -i C:\Users\pmadh\.ssh\id_rsa C:\path\to\your-private-key.pem opc@<YOUR_INSTANCE_IP>:~/.oci/
+```
+
+Or if you're using VS Code Remote SSH, you can just **drag and drop** the `.pem` file into the file explorer.
+
+On the instance, create the directory and set permissions:
+```bash
+mkdir -p ~/.oci
+# Move the .pem file here if not already
+chmod 600 ~/.oci/your-private-key.pem
+```
+
+---
+
+## Step 5: Generate SSH Key Pair (if you don't have one on the instance)
+
+This SSH key will be injected into the **new ARM instance** you're trying to create:
+
+```bash
+# Generate a new SSH key pair (on the OCI instance)
+ssh-keygen -t ed25519 -C "your@email.com"
+# Press Enter for default path, set passphrase or leave empty
+
+# View the public key (you'll need this for .env)
+cat ~/.ssh/id_rsa.pub
+# or
+cat ~/.ssh/id_ed25519.pub
+```
+
+Copy the **entire output** — you'll paste it into `OCI_SSH_PUBLIC_KEY`.
+
+---
+
+## Step 6: Configure the `.env` File
+
+```bash
+cd ~/oci-arm-host-capacity
+cp .env.example .env
+nano .env
+```
+
+Fill in **all values** like this:
+
+```env
+OCI_REGION=ap-mumbai-1
+OCI_USER_ID=ocid1.user.oc1..aaaaaaa_YOUR_USER_OCID
+OCI_TENANCY_ID=ocid1.tenancy.oc1..aaaaaaa_YOUR_TENANCY_OCID
+OCI_KEY_FINGERPRINT=xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx
+
+OCI_PRIVATE_KEY_FILENAME="/home/opc/.oci/your-private-key.pem"
+OCI_SUBNET_ID=ocid1.subnet.oc1.ap-mumbai-1.aaaaaaa_FROM_STEP_2
+OCI_IMAGE_ID=ocid1.image.oc1.ap-mumbai-1.aaaaaaa_FROM_STEP_2
+
+# For the full free ARM instance (4 OCPUs, 24 GB RAM)
+OCI_OCPUS=4
+OCI_MEMORY_IN_GBS=24
+
+OCI_SHAPE=VM.Standard.A1.Flex
+OCI_MAX_INSTANCES=1
+
+OCI_SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1N... your@email.com"
+
+# Leave empty for ARM — script auto-discovers all ADs
+OCI_AVAILABILITY_DOMAIN=
+
+CACHE_AVAILABILITY_DOMAINS=1
+OCI_BOOT_VOLUME_SIZE_IN_GBS=
+OCI_BOOT_VOLUME_ID=
+TOO_MANY_REQUESTS_TIME_WAIT=600
+```
+
+> [!WARNING]
+> - Make sure `OCI_SSH_PUBLIC_KEY` is on **ONE line** — no line breaks!
+> - Make sure the `.pem` file path is **absolute** (starts with `/`)
+> - Use your **actual** region, not `eu-frankfurt-1` from the example
+
+Save: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+---
+
+## Step 7: Test the Script
+
+```bash
+cd ~/oci-arm-host-capacity
+php index.php
+```
+
+Expected output (this is normal — it means the script is working correctly):
+```json
+{
+    "code": "InternalError",
+    "message": "Out of host capacity."
+}
+```
+
+If you get a different error, see [Troubleshooting](#troubleshooting) below.
+
+---
+
+## Step 8: Set Up Cron Job (Run Continuously Every Minute)
+
+```bash
+# Create log file
+touch ~/oci-arm-host-capacity/oci.log
+chmod 777 ~/oci-arm-host-capacity/oci.log
+
+# Find PHP path
+which php
+# Usually: /usr/bin/php
+
+# Set up cron job
+crontab -e
+```
+
+If prompted, choose `nano` as editor. Add this line at the bottom:
+
+```
+* * * * * /usr/bin/php /home/opc/oci-arm-host-capacity/index.php >> /home/opc/oci-arm-host-capacity/oci.log 2>&1
+```
+
+> [!NOTE]
+> - Replace `/home/opc` with your actual home directory (run `echo $HOME` to check)
+> - Replace `/usr/bin/php` with the output of `which php`
+> - This runs the script **every minute, 24/7**
+
+Save: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+Verify cron is set:
+```bash
+crontab -l
+```
+
+---
+
+## Step 9: Monitor the Log
+
+```bash
+# Watch the log in real-time
+tail -f ~/oci-arm-host-capacity/oci.log
+```
+
+When the script successfully creates an instance, you'll see a large JSON output with instance details instead of the "Out of host capacity" error.
+
+---
+
+## 🔧 Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| `Private key file does not exist` | Check `OCI_PRIVATE_KEY_FILENAME` path is absolute and file exists |
+| `Permission denied` on `.pem` file | Run `chmod 600 ~/.oci/your-key.pem` |
+| `Unable to parse message body` | Your `OCI_SSH_PUBLIC_KEY` has line breaks — put on single line |
+| `Invalid ssh public key` | Copy the key from `~/.ssh/id_rsa.pub` again, ensure no extra characters |
+| `NotAuthenticated` | Check User OCID, Tenancy OCID, Fingerprint, and Region match your API key |
+| `TooManyRequests (429)` | Normal — the script auto-waits 600 seconds (configurable via `TOO_MANY_REQUESTS_TIME_WAIT`) |
+
+---
+
+## ⚡ Pro Tips
+
+1. **Upgrade to PAYG** (Pay As You Go) — free benefits remain the same, but you get **priority** for instance launches and fewer "Out of Capacity" errors. Set up budget alerts as a safety net.
+
+2. **Telegram notifications** — Set `TELEGRAM_BOT_API_KEY` and `TELEGRAM_USER_ID` in `.env` to get a Telegram message when the instance is created. This way you don't have to monitor the log.
+
+3. **After success** — Remember to:
+   - Remove the cron job: `crontab -e` and delete the line
+   - Assign a public IP to the new ARM instance (OCI Console → Instance → Attached VNICs → IPv4 Addresses → Edit → Ephemeral)
+
+4. **Memory considerations** — Your 1 GB instance is more than enough for this PHP script. It's very lightweight.
+
+5. **Multiple ADs** — Leave `OCI_AVAILABILITY_DOMAIN` empty so the script tries **all** availability domains in your region automatically.
